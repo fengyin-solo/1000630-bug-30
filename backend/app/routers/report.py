@@ -6,28 +6,56 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.report import ReportService
+from app.services.report import STATUS_ORDER, ReportService
 
 router = APIRouter(prefix="/api/report", tags=["报告出具"])
 
 service = ReportService()
 
 LIST_FIELDS = ["报告编号", "关联样品", "报告类型", "编制人员", "审核人员", "签发人员", "出具日期", "报告状态"]
-STATUSES = ["待编制", "已编制", "待签发", "已出具", "已作废"]
+STATUSES = list(STATUS_ORDER)
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按报告编号检索"),
+    keyword: str | None = Query(default=None, description="按报告编号检索（兼容旧入口）"),
+    report_no: str | None = Query(default=None, description="按报告编号检索"),
+    report_type: str | None = Query(default=None, description="按报告类型检索"),
+    issuer: str | None = Query(default=None, description="按签发人员检索"),
     status: str | None = Query(default=None, description="待编制、已编制、待签发、已出具、已作废"),
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1),
 ) -> PageResult[dict]:
-    """按报告编号与状态过滤报告出具列表；没有数据时返回空页，不报错。"""
+    """按报告编号、报告类型、签发人员与状态过滤报告列表。
+
+    筛选在分页前统一完成，翻页不会混入未命中记录；清空某个条件时传空串等同不传。
+    没有命中时返回空页与 total=0，由前端说明原因，不会退回全量数据。
+    """
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    status_value = (status or "").strip()
+    if status_value and status_value not in STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"报告状态「{status_value}」不支持，可选：{'、'.join(STATUSES)}",
+        )
+    items, total = service.list_entries(
+        keyword=keyword,
+        report_no=report_no,
+        report_type=report_type,
+        issuer=issuer,
+        status=status_value or None,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出报告出具清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "report", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +84,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出报告出具清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "report", "total": total, "items": items}
