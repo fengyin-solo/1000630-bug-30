@@ -462,7 +462,7 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '报告状态': '报告出具样例2'},
  {'id': 3,
   'status': '待签发',
-  'pending': False,
+  'pending': True,
   'abnormal': False,
   '报告编号': 'REPO-0003',
   '关联样品': '报告出具样例3',

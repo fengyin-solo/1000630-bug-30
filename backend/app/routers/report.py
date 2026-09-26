@@ -3,31 +3,83 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.schemas import ActionResult, EntryPayload, PageResult
-from app.services.report import ReportService
+from app.services.report import STATUS_ORDER, ReportService
 
 router = APIRouter(prefix="/api/report", tags=["报告出具"])
 
 service = ReportService()
 
 LIST_FIELDS = ["报告编号", "关联样品", "报告类型", "编制人员", "审核人员", "签发人员", "出具日期", "报告状态"]
-STATUSES = ["待编制", "已编制", "待签发", "已出具", "已作废"]
+STATUSES = STATUS_ORDER
+
+
+def _read_filters(
+    report_no: str | None,
+    report_type: str | None,
+    issuer: str | None,
+) -> dict[str, str]:
+    """把独立查询参数收敛成服务层的字段条件；空串视为未填，绝不让空白参与过滤。"""
+    raw = {"报告编号": report_no, "报告类型": report_type, "签发人员": issuer}
+    return {field: value for field, value in raw.items() if value is not None}
 
 
 @router.get("", response_model=PageResult[dict])
 def list_entries(
-    keyword: str | None = Query(default=None, description="按报告编号检索"),
+    response: Response,
+    report_no: str | None = Query(default=None, alias="报告编号", description="按报告编号模糊检索"),
+    report_type: str | None = Query(default=None, alias="报告类型", description="按报告类型模糊检索"),
+    issuer: str | None = Query(default=None, alias="签发人员", description="按签发人员模糊检索"),
+    keyword: str | None = Query(default=None, description="兼容旧入口：按报告编号检索"),
     status: str | None = Query(default=None, description="待编制、已编制、待签发、已出具、已作废"),
-    page: int = 1,
-    size: int = 20,
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=10, ge=1),
 ) -> PageResult[dict]:
-    """按报告编号与状态过滤报告出具列表；没有数据时返回空页，不报错。"""
+    """按报告编号、报告类型、签发人员与状态过滤报告出具列表。
+
+    所有条件为 AND 关系，先过滤后分页；没有命中时返回空页并在 message 说明原因。
+    """
+    # 列表是动态数据，禁止浏览器/代理复用旧查询结果，避免“清空条件仍沿用上次结果”。
+    response.headers["Cache-Control"] = "no-store"
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
-    return PageResult(items=items, total=total, page=page, size=size)
+    if status is not None and status not in STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的报告状态「{status}」，可选：{'、'.join(STATUSES)}",
+        )
+
+    filters = _read_filters(report_no, report_type, issuer)
+    if keyword and keyword.strip():
+        filters.setdefault("报告编号", keyword)
+    items, total, message = service.list_entries(
+        filters=filters, status=status, page=page, size=size
+    )
+    return PageResult(items=items, total=total, page=page, size=size, message=message)
+
+
+@router.get("/export")
+def export_entries(
+    report_no: str | None = Query(default=None, alias="报告编号"),
+    report_type: str | None = Query(default=None, alias="报告类型"),
+    issuer: str | None = Query(default=None, alias="签发人员"),
+    status: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """导出报告出具清单：按当前筛选条件导出全量数据，作废报告不会混入在办状态结果。"""
+    if status is not None and status not in STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的报告状态「{status}」，可选：{'、'.join(STATUSES)}",
+        )
+    items, total, _ = service.list_entries(
+        filters=_read_filters(report_no, report_type, issuer),
+        status=status,
+        page=1,
+        size=10000,
+    )
+    return {"module": "report", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +108,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出报告出具清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "report", "total": total, "items": items}
